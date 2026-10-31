@@ -65,6 +65,17 @@ def split_top_commas(s):
     return parts
 
 
+def brace_flatten(operand):
+    """'{%r1, %r2}' → ['%r1', '%r2'];普通操作数 → [operand] 原样。
+
+    cuobjdump 导出的 mma/ldmatrix 目的寄存器是花括号组(split_top_commas
+    按深度保留为一个操作数),而展开 pass 需要逐寄存器访问。"""
+    s = operand.strip()
+    if s.startswith("{") and s.endswith("}"):
+        return [p.strip() for p in s[1:-1].split(",") if p.strip()]
+    return [operand]
+
+
 def parse_inst(line, line_no):
     m = PRED_RE.match(line)
     pred = None
@@ -121,6 +132,8 @@ def _parse_body(lines, i):
         else:
             pending = (pending + " " + bl) if pending else bl
             if bl.endswith(","):         # 操作数列表被换行,继续累积
+                continue
+            if not bl.endswith(";"):     # 操作码单独一行,操作数在下一行
                 continue
             inst = parse_inst(pending, i)
             if inst:

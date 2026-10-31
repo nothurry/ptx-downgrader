@@ -5,7 +5,7 @@
 # 读全 A 行 / B 列,用 f32 FMA 算完整点积。
 # k16 布局与展开公式已由 tools/sim_mma.py 对拍 numpy 验证;
 # k8 布局已由 tools/sim_mma8.py 对拍 numpy 验证(布局公式均取自 PTX ISA 9.0)。
-from .parser import Inst, UnsupportedError
+from .parser import Inst, UnsupportedError, brace_flatten
 
 # 形状 → (k 长度, 输入类型, 累加器类型)
 SHAPES = {
@@ -45,7 +45,8 @@ def _gen_int8_entry(inst, k_len):
 
 
 def _gen(inst, k_len, itype, atype):
-    ops = inst.operands
+    # cuobjdump 导出的 mma 行目的/源寄存器是花括号组,展平后按位取用
+    ops = [g for part in inst.operands for g in brace_flatten(part)]
     k8 = (k_len == 8)
     # 操作数:f32 acc = D4 + A4 + B(2 k16 / 1 k8) + C4;f16 acc 的 D/C 各 2 字
     if atype == "f32":
@@ -234,7 +235,7 @@ def _gen_int8(inst, k_len):
              列 2t+1 用 lane 8t+4+j。
     dp4a.s32.s32 d, a, b, c:c += Σ a[i]*b[i](4 字节点积)。
     """
-    ops = inst.operands
+    ops = [g for part in inst.operands for g in brace_flatten(part)]
     # s32 累加器操作数:D4 + A4 + B(2 或 1)+ C4
     k8 = (k_len == 16 and False)  # 占位:k32 → B 2 字;k16 → B 1 字
     if k_len == 32:

@@ -38,7 +38,8 @@ The `downgrader` package rewrites PTX at the text/IR level. Every transform is s
 | Special registers in ALU/addresses (`%tid.x` as operand) → materialize via `mov` | PTX 7.0 restriction |
 | Opcode fixes: `dp4a.lo` qualifier, `mov.f16` immediates, cache-hint stripping (`L1::evict_*`) | ISA 7.0 syntax differences |
 | int8 `mma.sync` (m16n8k32/m16n8k16/m8n8k16, s32 acc) → `dp4a` sequences | Quantized-inference workhorse; verified 128/128 exact on GTX 1070 |
-| Rejection with actionable errors: `wgmma`, `tcgen05`, TMA family, `ldmatrix/stmatrix`, `wmma`, clusters | No software equivalent at acceptable cost (for now) |
+| Rejection with actionable errors: `wgmma`, `tcgen05`, TMA family, `stmatrix`, `wmma`, clusters | No software equivalent at acceptable cost (for now) |
+| `ldmatrix` (x1/x2/x4 ± .trans) and `redux.sync` (full-warp) software expansion | GPU-verified fragment layouts (v0.4.0) |
 
 Everything runs **entirely in user space**: no driver modification, no kernel-mode code, no signature patching. The output is plain PTX that ptxas compiles and the stock driver loads.
 
@@ -99,7 +100,7 @@ sm_80:  203/221 (91.9%)
 sm_90:  203/221 (91.9%)
 ```
 
-Remaining rejects are the int8 `mma` family (`s32.s8.s8.s32` shapes — layout work pending) and `ldmatrix/stmatrix` (fragment-layout rearrangement, pending).
+v0.4.0 adds software expansion for the int8 `mma` family, `ldmatrix` (x1/x2/x4 ± .trans) and `redux.sync` — re-run the survey on your binary for current numbers. Remaining rejects: `stmatrix`, `elect.sync`, TMA/cluster family.
 
 ### GPU verification suites
 
@@ -134,7 +135,8 @@ DEVLOG.md       full development log with every bug found and mechanism discover
 - cuBLAS/cuDNN ship SASS-only (no PTX): engines depending on them can't be downgraded. Self-contained kernel engines (llama.cpp with `-DGGML_CUDA_NO_CUBLAS`, or builds using `-arch=compute_61`) are the target use case.
 - Downgraded tensor-core code runs at scalar-FMA speed; expect a fraction of native mma throughput.
 - FMA accumulation order differs from hardware mma — results match within float tolerance, not bit-exact (except where the reference is also order-exact).
-- `ldmatrix`/`redux.sync`/`elect.sync` expansion passes are tracked for v0.4.
+- `redux.sync` is expanded for full-warp masks only (subset masks rejected with a clear error); `elect.sync`/`stmatrix` remain unsupported.
+- `ldmatrix` expansion is validated per-instruction (x1/x2/x4 ± .trans, GPU-verified against the PTX ISA fragment tables). An unresolved ptxas 11.4 scheduling interaction was observed in a hand-written compound test kernel (multiple ldmatrix + mma in one entry); real-kernel validation is still pending — treat downgraded `ldmatrix` output as experimental and verify results.
 
 ## License
 

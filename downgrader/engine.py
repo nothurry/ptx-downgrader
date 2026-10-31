@@ -2,7 +2,8 @@
 # 每个 pass 都可以做"一变多"(cp.async 展开),展开出的指令继承原谓词。
 import re
 
-from .parser import Inst, Label, UnsupportedError, render_module
+from .parser import (Inst, Label, UnsupportedError, render_module,   # noqa: F401
+                     brace_flatten)
 from .mma import pass_mma
 
 # ---- 特殊寄存器 ------------------------------------------------------------
@@ -54,7 +55,7 @@ REJECT_BY_ARCH = {
     "clusterlaunchcontrol": (100, "cluster 启动控制"),
     "barrier.cluster": (90, "cluster 屏障:需要 thread block cluster"),
     "setmaxnreg": (90, "Hopper 寄存器重分配"),
-    "elect.sync": (90, "warp 选举(已提供 shfl 降级见 pass_warp_sync)"),
+    "elect.sync": (90, "warp 选举:展开需解析双目的 {pred, reg} 形式,暂未支持"),
     "tensormap": (90, "TMA 张量描述符"),
     "cp.async.bulk": (90, "TMA 大批量异步拷贝:需要 TMA 硬件"),
     "cp.reduce.async.bulk": (90, "TMA 归约拷贝:需要 TMA 硬件"),
@@ -427,6 +428,260 @@ def pass_special_regs(entry, tmp):
     entry.body = body
 
 
+def pass_strip_cta(entry):
+    """剥 opcode 里的 ::cta 作用域限定:非 cluster 启动下 ::cta ≡ 默认作用域。
+    必须在 pass_reject 之前跑,否则带 .shared::cta 的行会被整行拒绝。"""
+    for x in entry.body:
+        if isinstance(x, Inst) and "::cta" in x.opcode:
+            x.opcode = x.opcode.replace("::cta", "")
+
+
+# ---- redux.sync → shfl 蝶形归约 -------------------------------------------
+# redux.sync.op.type d, a, membermask 是 sm_80 引入的全 warp 规约。
+# 全掩码时蝶形交换(offset 16,8,4,2,1)5 轮后所有 lane 拿到同一结果,
+# 与硬件语义一致;子集掩码需要按 lane 有界交换,如实拒绝。
+_REDUX_OPS = {
+    "add.s32": "add.s32", "add.u32": "add.u32",
+    "min.s32": "min.s32", "min.u32": "min.u32",
+    "max.s32": "max.s32", "max.u32": "max.u32",
+    "and.b32": "and.b32", "or.b32": "or.b32", "xor.b32": "xor.b32",
+}
+
+
+def pass_redux(entry, tmp, target="sm_61"):
+    body = []
+    for x in entry.body:
+        if not isinstance(x, Inst) or not x.opcode.startswith("redux.sync"):
+            body.append(x)
+            continue
+        if x.pred:
+            raise UnsupportedError(
+                f"{entry.name} 行{x.line_no}: 谓词化 redux 会使 shfl.sync "
+                f"参与者不确定,不支持")
+        key = x.opcode[len("redux.sync."):]
+        if key not in _REDUX_OPS:
+            raise UnsupportedError(
+                f"{entry.name} 行{x.line_no}: `{x.opcode}` — "
+                f"该 redux 变体无 shfl 等价降级")
+        if len(x.operands) != 3:
+            raise UnsupportedError(
+                f"{entry.name} 行{x.line_no}: redux 操作数异常")
+        d, a, mask = (o.strip() for o in x.operands)
+        if mask not in ("0xffffffff", "4294967295", "-1"):
+            raise UnsupportedError(
+                f"{entry.name} 行{x.line_no}: redux 子集掩码 `{mask}` "
+                f"不支持(仅全 warp 0xffffffff)")
+        op = _REDUX_OPS[key]
+        if _arch_num(target) >= 70:
+            shfl = "shfl.sync.bfly.b32"
+        else:
+            shfl = "shfl.bfly.b32"          # sm_70 前无 .sync 形式
+        acc, t = tmp.get(32), tmp.get(32)
+        emit = lambda o, *os_: body.append(                 # noqa: E731
+            Inst(x.pred, o, list(os_), x.line_no))
+        emit("mov.b32", acc, a)
+        for off in (16, 8, 4, 2, 1):
+            if shfl.endswith("sync.bfly.b32"):
+                emit(shfl, t, acc, str(off), "31", "0xffffffff")
+            else:
+                emit(shfl, t, acc, str(off), "31")
+            emit(op, acc, acc, t)
+        emit("mov.b32", d, acc)
+    entry.body = body
+
+
+# ---- ldmatrix → 共享内存行地址交换 + 逐元素加载 ----------------------------
+# ldmatrix.sync.aligned.m8n8.xN[.trans].shared.b16:硬件版由 lanes 0..8N-1
+# 提供各 8x8 块的行地址,fragment 按 mma 布局分发到 32 lane。
+# 展开:各 lane 把行地址(u32,共享地址恒 < 4GB)存进每 warp 的共享槽,
+# bar.sync 后每 lane 按 mma fragment 布局取所需行的地址,读两个 u16 打包。
+# 必须:① 全部用 b32 共享访存(u64 共享读写在本项目工具链上不可靠);
+# ② 每条 ldmatrix 的读写块首尾各有 bar.sync —— 同一 entry 的多条
+#    ldmatrix 复用同一批槽,尾屏障防止后一条的 store 与前一条跨 lane
+#    的 read 竞争(三种实现变体 × GTX 1070 实测教训,详见 DEVLOG)。
+# 布局(PTX ISA "ldmatrix",与 mma fragment 表一致,首元素 = 低半字):
+#   非 trans:lane (g,t) 寄存器 j = {m_j[2t][g], m_j[2t+1][g]},行地址来自
+#             lanes 8j+2t / 8j+2t+1
+#   trans   :lane (g,t) 寄存器 j = {m_j[g][2t],  m_j[g][2t+1]},行地址来自
+#             lane 8j+g
+LDM_SHARED_VAR = "__dg_ldm"
+LDM_TOTAL = 128 * 32                  # 每 warp 32 槽 × 4B × 32 warp
+LDM_DECL_BASE = [".reg .b32 %dgla<8>;", ".reg .b32 %dglb<4>;",
+                 ".reg .b16 %dglc<2>;"]
+
+_REG_DECL_RE = re.compile(r"\.reg\s+(\.\w+)\s+(%\w+)(?:<(\d+)>)?\s*;")
+
+
+def _reg_widths(entry):
+    """扫描 entry 的 .reg 声明 → {寄存器名: 位宽}。池 %rd<N> 展开成员。"""
+    widths = {}
+    for x in entry.body:
+        if isinstance(x, Inst) or not isinstance(x, str):
+            continue
+        m = _REG_DECL_RE.match(x.strip())
+        if not m:
+            continue
+        bits = {"64": 64, "32": 32, "16": 16}.get(m.group(1)[2:], 32)
+        if m.group(3):
+            for i in range(int(m.group(3))):
+                widths[f"{m.group(2)}{i}"] = bits
+        else:
+            widths[m.group(2)] = bits
+    return widths
+
+
+def _gen_ldmatrix(inst, widths, target="sm_61", k=0):
+    """单条 ldmatrix 的 b32 共享交换展开(结构对齐已验证的 mma 交换)。
+    k = 本条指令在 entry 内的序号:地址(%dglk<k>)与列偏移(%dglm<k>)寄存器
+    按指令专属 —— 两条 ldmatrix 共用寄存器时,ptxas 会把后一条的寄存器
+    定义提升进前一条的存取窗口(单线程合法),跨 lane 交换随即被污染。"""
+    parts = inst.opcode.split(".")
+    xn, trans = None, False
+    for p in parts:
+        if p in ("x1", "x2", "x4"):
+            xn = int(p[1])
+        elif p == "trans":
+            trans = True
+        elif p == "b4":
+            raise UnsupportedError(
+                f"行{inst.line_no}: ldmatrix .b4 子字形式不支持")
+    if xn is None or parts[-1] != "b16":
+        raise UnsupportedError(
+            f"行{inst.line_no}: `{inst.opcode}` — 仅支持 m8n8.x1/x2/x4 .b16")
+    if len(inst.operands) != 2:
+        raise UnsupportedError(
+            f"行{inst.line_no}: ldmatrix 操作数异常")
+    dests = brace_flatten(inst.operands[0])
+    if len(dests) != xn:
+        raise UnsupportedError(
+            f"行{inst.line_no}: ldmatrix 目的寄存器 {len(dests)} 个 != x{xn}")
+    addr = inst.operands[1].strip()
+    if not (addr.startswith("[") and addr.endswith("]")):
+        raise UnsupportedError(
+            f"行{inst.line_no}: ldmatrix 地址操作数异常: {addr}")
+    inner = addr[1:-1].strip()
+    if "+" in inner:
+        base, off = inner.split("+", 1)
+        if not off.lstrip("-").isdigit():
+            raise UnsupportedError(
+                f"行{inst.line_no}: ldmatrix 寄存器偏移不支持: {addr}")
+        off = int(off, 0)
+    else:
+        base, off = inner, 0
+
+    LA = [f"%dgla{i}" for i in range(8)]
+    B = [f"%dglb{i}" for i in range(3)]
+    H = [f"%dglc{i}" for i in range(2)]
+    ADDR = f"%dglk{k}"                            # 本指令专属:行地址
+    COLOFF = f"%dglm{k}"                          # 本指令专属:列偏移
+    L = []
+
+    def emit(op, *os_):
+        L.append(Inst(inst.pred, op, list(os_), inst.line_no))
+
+    # ---- 线性 tid → warp;lane/g/t ----
+    emit("mov.u32", LA[0], "%tid.x")
+    emit("mov.u32", LA[1], "%ntid.x")
+    emit("mov.u32", LA[2], "%tid.y")
+    emit("mov.u32", LA[3], "%ntid.y")
+    emit("mov.u32", LA[4], "%tid.z")
+    emit("mul.lo.u32", LA[5], LA[2], LA[1])
+    emit("mul.lo.u32", LA[6], LA[1], LA[3])
+    emit("mul.lo.u32", LA[7], LA[6], LA[4])
+    emit("add.u32", LA[0], LA[0], LA[5])
+    emit("add.u32", LA[0], LA[0], LA[7])          # 线性 tid
+    emit("shr.u32", LA[1], LA[0], "5")            # warp(块内)
+    emit("and.b32", LA[2], LA[0], "31")           # lane
+    emit("shr.u32", LA[3], LA[2], "2")            # g
+    emit("and.b32", LA[4], LA[2], "3")            # t
+
+    # ---- 地址操作数 → u32(存入专属寄存器)----
+    if base.startswith("%"):
+        if widths.get(base) == 64:
+            emit("cvt.u32.u64", ADDR, base)
+        else:
+            emit("mov.u32", ADDR, base)
+    else:
+        emit("mov.u32", ADDR, base)               # 共享变量符号
+    if off:
+        emit("add.u32", ADDR, ADDR, str(off))
+
+    # ---- 全程 u32 共享寻址(共享地址恒 < 4GB;u64 地址链会触发
+    #      ptxas 11.4 的调度问题,GTX 1070 实测)----
+    # 槽基址 %dglb0 = __dg_ldm + warp*128;存本 lane 行地址
+    emit("mov.u32", B[0], LDM_SHARED_VAR)
+    emit("shl.b32", B[1], LA[1], "7")             # warp*128
+    emit("add.u32", B[0], B[0], B[1])
+    emit("shl.b32", B[1], LA[2], "2")             # lane*4
+    emit("add.u32", B[2], B[0], B[1])
+    emit("st.shared.u32", f"[{B[2]}]", ADDR)
+    emit("bar.sync", "0")
+
+    # ---- 列偏移(专属寄存器):非 trans 2g 字节;trans 4t 字节 ----
+    if not trans:
+        emit("shl.b32", LA[7], LA[3], "1")
+    else:
+        emit("shl.b32", LA[7], LA[4], "2")
+    emit("mov.u32", COLOFF, LA[7])
+
+    for j in range(xn):
+        if not trans:
+            # 行地址槽:8j+2t / 8j+2t+1 → 字节 32j+8t / +4
+            emit("shl.b32", LA[7], LA[4], "3")
+            emit("add.u32", LA[7], LA[7], str(32 * j))
+        else:
+            # 行地址槽:8j+g → 字节 32j+4g
+            emit("shl.b32", LA[7], LA[3], "2")
+            emit("add.u32", LA[7], LA[7], str(32 * j))
+        emit("add.u32", B[1], B[0], LA[7])
+        emit("ld.volatile.shared.u32", LA[5], f"[{B[1]}]")
+        if not trans:
+            emit("add.u32", LA[7], LA[7], "4")    # 下一行槽
+            emit("add.u32", B[1], B[0], LA[7])
+            emit("ld.volatile.shared.u32", LA[6], f"[{B[1]}]")
+        emit("add.u32", B[1], LA[5], COLOFF)      # e0 = 行地址 + 列偏移
+        emit("ld.volatile.shared.u16", H[0], f"[{B[1]}]")
+        if not trans:
+            emit("add.u32", B[1], LA[6], COLOFF)  # e1
+        else:
+            emit("add.u32", B[1], B[1], "2")      # e1 = e0 + 2
+        emit("ld.volatile.shared.u16", H[1], f"[{B[1]}]")
+        emit("mov.b32", dests[j], "{" + H[0] + ", " + H[1] + "}")
+    # 读尾屏障:下一条 ldmatrix 的 store 不得越过它
+    emit("bar.sync", "0")
+    return L
+
+
+def pass_ldmatrix(entry, target="sm_61"):
+    body = []
+    expanded = False
+    widths = _reg_widths(entry)
+    # 每条 ldmatrix 专属的地址/列偏移寄存器(池大小 = 指令数)
+    n_ldm = sum(1 for x in entry.body
+                if isinstance(x, Inst) and x.opcode.startswith("ldmatrix"))
+    k = 0
+    for x in entry.body:
+        if not isinstance(x, Inst) or not x.opcode.startswith("ldmatrix"):
+            body.append(x)
+            continue
+        if x.pred:
+            raise UnsupportedError(
+                f"{entry.name} 行{x.line_no}: 谓词化 ldmatrix 破坏 .aligned "
+                f"全 warp 约定,不支持")
+        body.extend(_gen_ldmatrix(x, widths, target, k))
+        k += 1
+        expanded = True
+    if expanded:
+        head = [f".shared .align 4 .b8 {LDM_SHARED_VAR}[{LDM_TOTAL}];"]
+        head.extend(LDM_DECL_BASE)
+        if n_ldm:
+            head.append(f".reg .b32 %dglk<{n_ldm}>;")
+            head.append(f".reg .b32 %dglm<{n_ldm}>;")
+        entry.body = head + body
+    else:
+        entry.body = body
+
+
 def downgrade_module(mod, target="sm_61"):
     """整体管线。target: 降级目标(sm_61/70/75/80/86/89)。
     返回 (渲染文本, warnings)。"""
@@ -449,6 +704,7 @@ def downgrade_module(mod, target="sm_61"):
 
     tgt = _arch_num(target)
     for e in mod["entries"]:
+        pass_strip_cta(e)             # ::cta ≡ 默认作用域,先剥再判
         pass_reject(e, target)
         tmp = TempAlloc()
         pass_opcode_fix(e)
@@ -457,6 +713,8 @@ def downgrade_module(mod, target="sm_61"):
         pass_mbarrier(e)
         pass_griddepcontrol(e)
         pass_softfloat(entry=e, tmp=tmp)
+        pass_redux(e, tmp, target)    # redux.sync 是 sm_80 引入
+        pass_ldmatrix(e, target)      # ldmatrix 是 sm_75 引入
         shared_used = [False]
         pass_mma(e, shared_used)
         pass_special_regs(e, tmp)

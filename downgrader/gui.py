@@ -61,6 +61,13 @@ T = {
     "running":   ("降级中…", "Running…"),
     "log":       ("日志 / 结果:", "Log / results:"),
     "open_dir":  ("打开产物目录", "Open output folder"),
+    "batch":     ("批量处理文件夹…", "Batch process a folder…"),
+    "batch_pick": ("选择要批量处理的文件夹", "Pick a folder to batch-process"),
+    "batch_empty": ("该文件夹内没有可处理的文件(.ptx/.dll/.so/.cubin/.fatbin)",
+                    "No processable files (.ptx/.dll/.so/.cubin/.fatbin) in that folder"),
+    "batch_done": ("批量完成: {} 个文件成功, {} 个失败。耗时 {:.1f}s",
+                   "Batch done: {} files ok, {} failed. {:.1f}s"),
+    "copy_log":  ("复制日志", "Copy log"),
     "gpu_none":  ("未检测到 NVIDIA 驱动 — 仍可降级,请自行选择目标架构",
                   "No NVIDIA driver detected — downgrade still works, pick the target manually"),
     "gpu_too_old": ("显卡 {} 是 sm_{},低于本项目最低支持架构 sm_61",
@@ -210,6 +217,10 @@ class App:
         self.btn_open = ttk.Button(self.root, command=self.open_outdir,
                                    state="disabled")
         self.btn_open.pack(fill="x", padx=8, pady=(0, 6))
+        self.btn_batch = ttk.Button(self.root, command=self.pick_folder)
+        self.btn_batch.pack(fill="x", padx=8, pady=(0, 6))
+        self.btn_copy = ttk.Button(self.root, command=self.copy_log)
+        self.btn_copy.pack(fill="x", padx=8, pady=(0, 6))
 
         self.progress = ttk.Progressbar(self.root, mode="determinate")
         self.progress.pack(fill="x", padx=8)
@@ -230,6 +241,7 @@ class App:
                        ("target", self.lbl_target),
                        ("validate", self.chk_validate),
                        ("run", self.btn_run), ("open_dir", self.btn_open),
+                       ("batch", self.btn_batch), ("copy_log", self.btn_copy),
                        ("log", self.lbl_log), ("lang", self.lbl_lang)):
             if key == "title":
                 w.title(T[key][0 if self.lang == "zh" else 1])
@@ -263,6 +275,12 @@ class App:
                        ("*", "*.*")])
         if path:
             self.var_file.set(path)
+
+    def copy_log(self):
+        text = self.log.get("1.0", "end").strip()
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
 
     def open_outdir(self):
         if not self.out_dir:
@@ -304,6 +322,48 @@ class App:
         self.say(f"{name} ({arch}) → {floor}")
 
     # ----------------------------------------------------------------- run
+    def pick_folder(self):
+        """批量模式:选择文件夹,处理其中全部 CUDA 相关文件。"""
+        d = filedialog.askdirectory(title=self.tr("batch_pick"))
+        if not d:
+            return
+        exts = (".ptx", ".dll", ".so", ".cubin", ".fatbin")
+        files = sorted(f for f in os.listdir(d)
+                       if f.lower().endswith(exts))
+        if not files:
+            messagebox.showinfo(self.tr("title"), self.tr("batch_empty"))
+            return
+        self.var_file.set(d)
+        self.btn_run.configure(state="disabled", text=self.tr("running"))
+        self.btn_open.configure(state="disabled")
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+        threading.Thread(target=self._work_batch,
+                         args=(d, files), daemon=True).start()
+
+    def _work_batch(self, d, files):
+        t0 = time.time()
+        ok = fail = 0
+        for f in files:
+            path = os.path.join(d, f)
+            self.say(f"===== {f}")
+            try:
+                self._pipeline(path)
+                ok += 1
+            except SystemExit as e:
+                fail += 1
+                self.say(f"{self.tr('err')} {e}")
+            except UnsupportedError as e:
+                fail += 1
+                self.say(f"{self.tr('unsupported')} {e}")
+            except Exception as e:                   # noqa: BLE001
+                fail += 1
+                self.say(f"{self.tr('err')} {type(e).__name__}: {e}")
+        dt = time.time() - t0
+        self.say(f"{self.tr('batch_done')}".format(ok, fail, dt))
+        self.root.after(0, self._done, 0)
+
     def run(self):
         path = self.var_file.get().strip()
         if not path:

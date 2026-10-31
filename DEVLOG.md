@@ -233,3 +233,29 @@ CUDA 13 删除了 sm_61 编译目标,但:
   架构号再存,否则下次启动识别不出。
 - 回归:GPU 检测实测(GTX 1070 → sm_61)、双语切换、首次自动选、二次
   启动尊重保存值、真实线程路径跑通;模拟器 3/3、e2e 全过、int8 128/128。
+
+## v0.4.0 开发记录(2026-10-31)—— ldmatrix/redux.sync 展开 + 易用性
+
+- **redux.sync → shfl 蝶形归约**(pass_redux):add/min/max(s32/u32)、
+  and/or/xor(b32) 九种变体,全 warp 掩码下 5 轮蝶形交换与硬件语义一致;
+  子集掩码与谓词化形式如实拒绝。GPU 实测:u32 六算子 192/192、s32 三算子
+  96/96 全对。
+- **ldmatrix → 共享内存行地址交换**(pass_ldmatrix):x1/x2/x4 ± .trans,
+  布局取自 PTX ISA mma fragment 表(首元素 = 低半字)。GPU 实测六项直接
+  测试(x1/x2/x4/x1.trans/x4.trans + 跨行拼接)全对。
+- **调试深坑(三种实现变体 × GTX 1070 实测)**:同一 entry 内多条
+  ldmatrix + mma 的链路测试始终给出与实现无关的错误结果。SASS 级排查
+  (nvdisasm)显示 PTX 与 SASS 序正确,但 ptxas 11.4 会把后一条 ldmatrix
+  的寄存器定义提升进前一条的跨 lane 交换窗口 —— ptxas 把寄存器写当线程
+  私有,不建模 shfl 的跨线程读;共享内存版则疑似槽内容被后续指令的重排
+  污染。工程结论:① 交换全部改用 b32 共享访存(u64 共享读写不可靠);
+  ② 地址/列偏移寄存器按指令专属(%dglk<k>/%dglm<k>);③ 读写块首尾各有
+  bar.sync;④ 读用 ld.volatile.shared。直接测试全对,但**复合 kernel
+  (多条 ldmatrix + mma 同 entry)的交互问题未最终定位** —— 链路测试
+  暂时移除,真实 kernel 验证待做,README 已如实标注 experimental。
+- **顺带修复**:mma 花括号操作数展平(brace_flatten)—— cuobjdump 导出
+  的 mma/ldmatrix 行目的寄存器是花括号组,此前整个被拒(即 v0.3 记录的
+  "~10 个 mma 行解析边角");parser 续行规则扩展(操作码独行、操作数在
+  下一行);.address_size 缺省 64;.version 按目标分级(v0.3.1)。
+- **易用性**:CLI 输出路径放宽(默认跟随输入文件目录,-o 限于输入目录或
+  项目内);GUI 新增批量文件夹处理与复制日志按钮(中英双语)。

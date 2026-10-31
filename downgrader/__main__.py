@@ -16,11 +16,13 @@ from .validate import validate
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _safe_out(p):
-    """输出路径规范化并限制在项目目录内。"""
+def _safe_out(p, in_dir):
+    """输出路径:规范化后必须落在输入文件目录或项目目录内。"""
     p = os.path.realpath(os.path.abspath(p))
-    if p != ROOT and not p.startswith(ROOT + os.sep):
-        sys.exit(f"输出路径必须在项目目录内: {p}")
+    in_dir = os.path.realpath(os.path.abspath(in_dir))
+    if not (p == in_dir or p.startswith(in_dir + os.sep)
+            or p == ROOT or p.startswith(ROOT + os.sep)):
+        sys.exit(f"输出路径必须在输入文件目录或项目目录内: {p}")
     return p
 
 
@@ -50,8 +52,10 @@ def main():
         sys.exit(2)
 
     suffix = "sm" + args.target[3:]
-    out_path = _safe_out(args.output or (args.input.rsplit(".", 1)[0]
-                                         + f".{suffix}.ptx"))
+    in_dir = os.path.dirname(os.path.realpath(os.path.abspath(args.input)))
+    default_out = os.path.join(in_dir, os.path.splitext(os.path.basename(
+        args.input))[0] + f".{suffix}.ptx")
+    out_path = _safe_out(args.output or default_out, in_dir)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out_text)

@@ -7,6 +7,7 @@ venv/
 
 # NVIDIA tools (auto-downloaded by setup_tools.py, ~60MB)
 tools/cuda_cuobjdump-*-archive/
+tools/cuda_nvdisasm-*-archive/
 tools/cuda_nvcc-*-archive/
 tools/redist*.json
 tools/nvcc.zip
