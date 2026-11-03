@@ -259,3 +259,32 @@ CUDA 13 删除了 sm_61 编译目标,但:
   下一行);.address_size 缺省 64;.version 按目标分级(v0.3.1)。
 - **易用性**:CLI 输出路径放宽(默认跟随输入文件目录,-o 限于输入目录或
   项目内);GUI 新增批量文件夹处理与复制日志按钮(中英双语)。
+
+
+## v0.4.1 使用可行性验证(2026-11-03)
+
+对项目做了一次端到端"真实用户路径"验证,并修复验证中暴露的一个 CLI 缺陷。
+
+### 验证矩阵(全部在 1070 / 驱动 472.12 上,零驱动改动)
+
+| 层 | 验证项 | 结果 |
+|---|---|---|
+| 引擎 | M1 端到端(k13_mixed/async/mma/mma8:改写→ptxas→JIT→执行→numpy 比对) | 全 PASS |
+| 指令 | redux u32+s32 (288) / ldmatrix 直载 (384) | 全 PASS |
+| 工具链 | CI 三件套(降级/校验/幂等) | 全 PASS |
+| **真实 fatbin** | 手工驱动 cicc+ptxas13 造出含压缩 sm_86/ISA 8.0 PTX 的 fatbin 容器 → cuobjdump 提取 → 降级 sm_61 → 1070 执行 | **fp16 缩放 4096 逐位一致,int8 dp4a 4096 精确一致** |
+
+### 暴露并修复的缺陷(commit 14f068f)
+
+CLI 对二进制输入(.fatbin/.dll/.so/.cubin)直接按文本 open 导致
+UnicodeDecodeError——GUI 批量管道早已支持 extract_ptx 提取,CLI 却没有。
+修复后 CLI 与 GUI 能力对齐,同样做了 _safe_name 消毒 + _safe_out 落地校验。
+
+### 环境记录
+
+- 无 MSVC 宿主编译器,nvcc 完整链不可用;用 fatbinary.exe 直接打包
+  PTX 造 fatbin(覆盖 fatbin 容器→提取这一段真实路径)。
+- ptxas 13 不接受 UTF-8 中文注释(Unexpected non-ASCII character);
+  mov.f16 立即数要用 mov.b16;dp4a 不带 .lo 限定符。
+- Mimosa 提交门禁:先跑官方 security_scan MCP(深度),逐条核实
+  finding(4 条均为既有防护路径/误报),封印报告生成后提交放行。
