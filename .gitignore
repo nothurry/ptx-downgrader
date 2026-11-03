@@ -20,6 +20,9 @@ tools/full_ptx.txt
 tools/ptx_isa.pdf
 tools/lc_releases.json
 
+# Local verification scratch (m3: fatbin experiments, stub toolchains)
+m3/
+
 # Editor / OS
 .vscode/
 .idea/
