@@ -30,6 +30,9 @@ known_new = [
 # Special-cased in the downgrader (handled by dedicated passes or benign
 # passthrough on any target):
 specially = {"griddepcontrol", "mbarrier", "cp.async", "tanh", "bmsk",
+             # dedicated expansion passes since v0.4.0 (pass_ldmatrix /
+             # pass_redux):
+             "ldmatrix", "redux.sync",
              # sm_61-native or PTX-6.0 syntax; hardware-supported on every
              # target this tool emits:
              "shfl.sync", "match.sync", "nanosleep", "applypriority",
@@ -45,18 +48,9 @@ for base, (intro, _why) in {**REJECT_BY_ARCH, **REJECT_ANY}.items():
     else:
         covered.add(base.split(".")[0])  # rejected for this target — covered
 
-# Known candidates for future expansion passes (tracked, not yet implemented):
-KNOWN_PENDING = {"ldmatrix", "redux.sync"}
-
 missing = [k for k in known_new
            if k not in covered and k.split(".")[0] not in covered]
-pending = [k for k in missing
-           if k in KNOWN_PENDING or k.split(".")[0] in KNOWN_PENDING]
-hard = [k for k in missing if k not in pending]
-if pending:
-    print(f"target {target}: pending expansion (tracked for v0.3):",
-          sorted(pending))
-if hard:
-    print(f"target {target}: UNCOVERED:", sorted(hard))
-if not missing:
+if missing:
+    print(f"target {target}: UNCOVERED:", sorted(missing))
+else:
     print(f"target {target}: none — full coverage")

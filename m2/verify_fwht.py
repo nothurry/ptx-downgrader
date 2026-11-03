@@ -49,6 +49,12 @@ def fwht_ref(x, scale):
 
 
 def find_blob(substr, tag, arch="sm_75"):
+    if not os.path.isfile(DUMP):
+        raise SystemExit(
+            f"缺少 {DUMP} —— 本脚本针对 llama.cpp 的 fwht kernel,需先导出:\n"
+            "  tools/cuda_cuobjdump-windows-x86_64-13.0.85-archive/bin/"
+            "cuobjdump.exe -ptx ggml-cuda.dll > tools/full_ptx.txt\n"
+            "(该文件含用户二进制,不入库,见 .gitignore)")
     text = open(DUMP, encoding="utf-8", errors="replace").read()
     segs, cur_arch, cur_start = [], None, 0
     for m in re.finditer(r"^arch = (sm_\d+)\s*$", text, flags=re.M):

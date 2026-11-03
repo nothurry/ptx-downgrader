@@ -30,13 +30,18 @@ SM61_OK = {
 # replaced): mma shapes, cp.async, mbarrier, griddepcontrol. tanh and bmsk
 # have software degradations since the deep review.
 HANDLED = {"mma", "cp", "mbarrier", "griddepcontrol", "tanh", "bmsk"}
-# What the downgrader will reject
-from downgrader.engine import REJECT_PREFIXES  # noqa: E402
+# What the downgrader will reject (per-arch intro tables + unconditional)
+from downgrader.engine import REJECT_BY_ARCH, REJECT_ANY   # noqa: E402
 
-REJECT = set(REJECT_PREFIXES)
+REJECT = set(REJECT_BY_ARCH) | set(REJECT_ANY)
 
 
 def main():
+    if not os.path.isfile(DUMP):
+        raise SystemExit(
+            f"missing {DUMP} — generate it with:\n"
+            "  tools/cuda_cuobjdump-windows-x86_64-13.0.85-archive/bin/"
+            "cuobjdump.exe -ptx app.dll > tools/full_ptx.txt")
     text = open(DUMP, encoding="utf-8", errors="replace").read()
     segs, cur_arch, cur_start = [], None, 0
     for m in re.finditer(r"^arch = (sm_\d+)\s*$", text, flags=re.M):

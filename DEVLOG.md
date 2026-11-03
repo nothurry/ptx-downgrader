@@ -288,3 +288,36 @@ UnicodeDecodeError——GUI 批量管道早已支持 extract_ptx 提取,CLI 却�
   mov.f16 立即数要用 mov.b16;dp4a 不带 .lo 限定符。
 - Mimosa 提交门禁:先跑官方 security_scan MCP(深度),逐条核实
   finding(4 条均为既有防护路径/误报),封印报告生成后提交放行。
+
+## v0.4.2 开发记录(2026-11-03)—— 全项目复查清理
+
+对全部功能/能力做了一次逐文件复查(7 个库模块 + 3 个测试层 + 12 个工具脚本),
+修复复查发现的外围维护债;核心库零行为变更,唯一引擎改动是错误文案。
+
+### 修复清单
+
+- **tools/test_bmsk_reg.py 删除**:该测试自提交时(bcea171)就用 4 操作数
+  bmsk 写法(官方为 3 操作数),与当时的引擎修复(9bd0a37)自相矛盾,
+  从未通过过;CI 不跑它所以未暴露。寄存器操作数场景已由 GPU 验证的
+  test_bmsk3.py 覆盖(b 即 %r2 寄存器)。
+- **tools/audit_opcodes.py**:导入已不存在的 REJECT_PREFIXES(引擎 v0.2
+  重构后改名 REJECT_BY_ARCH/REJECT_ANY),ImportError 完全不可用 → 改用
+  新表名,并对缺失的 full_ptx.txt 给出生成指引。
+- **m0/bisect_ptx.py**:相对路径 ptx/vec_add.ptx 改为基于脚本目录定位
+  (从项目根运行不再报错);C/E 用例的 FAIL 本是当初"发现 ISA 7.0 特殊
+  寄存器限制"的二分演示,已加注释标明预期结果,避免误读为回归。
+- **m2/verify_fwht.py**:缺 tools/full_ptx.txt 时给出三行生成指引
+  (该文件含用户二进制,不入库)。
+- **tools/audit_reject.py**:ldmatrix/redux.sync 移入"专项 pass 已覆盖"
+  集合(v0.4.0 实现),删除过时的 KNOWN_PENDING("tracked for v0.3");
+  现在 6 目标全部报告 "none — full coverage"。
+- **downgrader/engine.py**:stmatrix 拒绝文案删除过时的"(候选 M1.6)"。
+- **downgrader/mma.py**:删除 _gen_int8 里的占位死代码行。
+- **README.md**:转换表首行 .version 8.x → 7.0 修正为实际的分级 6.3/7.0/8.0。
+
+### 回归验证(全部复跑)
+
+m0 runner 3/3;m1 test_e2e/int8/redux/ldmatrix 全 PASS(288+384+128);
+sim_mma/sim_mma8/sim_mma8i VERIFIED;test_bmsk3 64/64;CI 三件套 +
+audit_reject(sm_61..sm_89 全 "none — full coverage");CLI fatbin 路径
+ptxas 校验通过。GitHub CI 4 矩阵全绿。

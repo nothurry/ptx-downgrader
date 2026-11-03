@@ -1,5 +1,10 @@
-# 对 vec_add.ptx 里的可疑语法逐个二分
+# 对 vec_add.ptx 里的可疑语法逐个二分。
+# 预期结果:C/E 的 FAIL 是本脚本当初的发现本身 —— PTX ISA 7.0 禁止特殊
+# 寄存器(%tid.x)直接做 ALU 操作数(错误码 218);F 用 mov 物化所以 OK。
 import ctypes
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 cuda = ctypes.CDLL("nvcuda.dll")
 CUresult = ctypes.c_int
@@ -64,7 +69,7 @@ try_ptx("B mul.wide imm", HEADER + """
 }
 """)
 
-# C: 特殊寄存器参与 add
+# C: 特殊寄存器参与 add —— 预期 FAIL(ISA 7.0 限制,错误码 218)
 try_ptx("C add tid.x", HEADER + """
 .visible .entry k(.param .u32 n)
 {
@@ -93,7 +98,7 @@ DONE:
 }
 """)
 
-# E: 完整复刻 vec_add 主体(带全局内存读写)
+# E: 完整复刻 vec_add 主体(带全局内存读写)—— 预期 FAIL,同 C(内含 %tid.x add)
 try_ptx("E global ld/st", HEADER + """
 .visible .entry k(.param .u64 a, .param .u64 c, .param .u32 n)
 {
@@ -120,5 +125,6 @@ DONE:
 }
 """)
 
-# F: vec_add.ptx 原文
-try_ptx("F original vec_add", open("ptx/vec_add.ptx").read())
+# F: vec_add.ptx 原文(特殊寄存器已用 mov 物化)—— 预期 OK
+try_ptx("F original vec_add",
+        open(os.path.join(HERE, "ptx", "vec_add.ptx")).read())

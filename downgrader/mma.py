@@ -237,7 +237,6 @@ def _gen_int8(inst, k_len):
     """
     ops = [g for part in inst.operands for g in brace_flatten(part)]
     # s32 累加器操作数:D4 + A4 + B(2 或 1)+ C4
-    k8 = (k_len == 16 and False)  # 占位:k32 → B 2 字;k16 → B 1 字
     if k_len == 32:
         n_expect = 14             # D4 + A4 + B2 + C4
         if len(ops) != n_expect:

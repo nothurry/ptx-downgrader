@@ -66,7 +66,7 @@ REJECT_BY_ARCH = {
 # 所有目标一律拒绝(即使目标代达标也无意义,如向 sm_61 降 sm_75 指令时
 # 这些指令的目标代本来就高于目标——放在这里只为报错文案统一)。
 REJECT_ANY = {
-    "stmatrix": (90, "sm_90 fragment 回写:降级需重排布局(候选 M1.6)"),
+    "stmatrix": (90, "sm_90 fragment 回写:降级需重排布局"),
 }
 
 REJECT_SUBSTR = (".cluster", "cta_group", ".shared::cta", "::cta")

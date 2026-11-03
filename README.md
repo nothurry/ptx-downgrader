@@ -27,7 +27,7 @@ The `downgrader` package rewrites PTX at the text/IR level. Every transform is s
 
 | Transform | Why it's needed |
 |---|---|
-| `.version 8.x → 7.0`, `.target sm_XX → sm_61` | Old drivers' JIT only accepts local-arch PTX |
+| `.version 8.x → 6.3/7.0/8.0` (tiered by target), `.target sm_XX → sm_61` | Old drivers' JIT only accepts local-arch PTX; each target's ptxas rejects versions above its tier |
 | `mma.sync.m16n8k16/m16n8k8` (6 dtype shapes) → shared-memory exchange + FMA sequences | Tensor-core instructions have no sm_61 hardware; each mma becomes a block-wide data exchange through shared memory plus 32–64 scalar FMAs |
 | `cp.async` → `ld.global` + `st.shared` (+ zero-fill for `src-size`, `bar.sync` for waits) | Asynchronous copies need sm_80 hardware |
 | `mbarrier` init/arrive/wait → conservative `bar.sync` or removal | Same |
